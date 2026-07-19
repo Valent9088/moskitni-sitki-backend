@@ -22,6 +22,9 @@ const STATUS_LABELS = {
   delivered: "🔵 Доставлено клієнту",
 };
 
+// Порядок статусів для команди /all та для читабельного виводу
+const STATUS_ORDER = ["new", "in_progress", "ready", "delivered"];
+
 function statusKeyboard(orderId) {
   return Markup.inlineKeyboard([
     [
@@ -30,6 +33,14 @@ function statusKeyboard(orderId) {
     ],
     [Markup.button.callback("🔵 Доставлено клієнту", `status:${orderId}:delivered`)],
   ]);
+}
+
+// Екранування спецсимволів HTML, щоб адреса/ім'я клієнта не ламали розмітку Telegram
+function esc(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function buildOrderMessage(order) {
@@ -43,26 +54,44 @@ function buildOrderMessage(order) {
       if (s.metalHinges) extrasParts.push("Металеві завіси з автодотягуванням");
       if (s.brakeMechanism) extrasParts.push("Гальмівний механізм");
       if (s.mounted) extrasParts.push("Монтаж");
-      const extrasText = extrasParts.length ? `\n   Комплектація: ${extrasParts.join(", ")}` : "";
+      const extrasLine = extrasParts.length ? `\n   <i>Комплектація: ${esc(extrasParts.join(", "))}</i>` : "";
 
-      return `${idx + 1}) ${it.label}
-   Кількість: ${it.quantity} шт × ${it.result?.total ?? "-"} грн = ${it.itemTotal} грн${extrasText}`;
+      return `<b>${idx + 1}.</b> ${esc(it.label)}
+   ${it.quantity} шт × ${it.result?.total ?? "-"} грн = <b>${it.itemTotal} грн</b>${extrasLine}`;
     })
     .join("\n\n");
 
-  return `🚨 НОВЕ ЗАМОВЛЕННЯ №${order.id}
-👤 Клієнт: ${order.customer_name}
-📞 Телефон: ${order.customer_phone}
-📱 Соцмережа для звʼязку: ${order.messenger}
-🤳 Посилання на інстаграм: ${order.contact_link || "-"}
-📍 Адреса: ${order.address}
+  const createdAt = order.created_at ? new Date(order.created_at.replace(" ", "T") + "Z") : null;
+  const dateStr = createdAt
+    ? createdAt.toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "";
 
-📦 ВИРОБИ (${items.length}):
+  return `<b>🚨 ЗАМОВЛЕННЯ №${order.id}</b>${dateStr ? `  <i>(${dateStr})</i>` : ""}
+
+👤 <b>Клієнт:</b> ${esc(order.customer_name)}
+📞 <b>Телефон:</b> ${esc(order.customer_phone)}
+📱 <b>Зв'язок:</b> ${esc(order.messenger)}${order.contact_link ? ` — ${esc(order.contact_link)}` : ""}
+📍 <b>Адреса:</b> ${esc(order.address)}
+
+📦 <b>ВИРОБИ (${items.length}):</b>
+
 ${itemsText}
 
-💰 РАЗОМ: ${order.total_price} грн
------------------------------------------
-Статус замовлення: ${STATUS_LABELS[order.status] || STATUS_LABELS.new}`;
+💰 <b>РАЗОМ: ${order.total_price} грн</b>
+
+Статус: <b>${STATUS_LABELS[order.status] || STATUS_LABELS.new}</b>`;
+}
+
+async function sendOrderList(ctx, rows, emptyText) {
+  if (rows.length === 0) {
+    return ctx.reply(emptyText);
+  }
+  for (const order of rows) {
+    await ctx.reply(buildOrderMessage(order), {
+      parse_mode: "HTML",
+      ...statusKeyboard(order.id),
+    });
+  }
 }
 
 /**
@@ -72,7 +101,10 @@ export async function notifyNewOrder(order) {
   if (!bot) return;
   for (const chatId of ALLOWED_IDS) {
     try {
-      const msg = await bot.telegram.sendMessage(chatId, buildOrderMessage(order), statusKeyboard(order.id));
+      const msg = await bot.telegram.sendMessage(chatId, buildOrderMessage(order), {
+        parse_mode: "HTML",
+        ...statusKeyboard(order.id),
+      });
       await db.execute({
         sql: "UPDATE orders SET telegram_message_id = ?, telegram_chat_id = ? WHERE id = ?",
         args: [msg.message_id, chatId, order.id],
@@ -93,21 +125,61 @@ if (bot) {
     return next();
   });
 
-  bot.start((ctx) => ctx.reply("👋 Вітаю! Це CRM-бот moskitni_sitki. Команда /orders — список поточних замовлень."));
+  const HELP_TEXT = `👋 CRM-бот moskitni_sitki. Доступні команди:
+
+/orders — активні замовлення (нові + в роботі + готові)
+/new — лише нові замовлення
+/inprogress — замовлення в роботі
+/ready — готові, очікують доставки
+/delivered — доставлені (останні 20)
+/all — усі замовлення (останні 30)
+/help — цей список команд`;
+
+  bot.start((ctx) => ctx.reply(HELP_TEXT));
+  bot.help((ctx) => ctx.reply(HELP_TEXT));
 
   bot.command("orders", async (ctx) => {
     const result = await db.execute(
       "SELECT * FROM orders WHERE status != 'delivered' ORDER BY created_at DESC LIMIT 20"
     );
-    const rows = result.rows;
+    await sendOrderList(ctx, result.rows, "Немає активних замовлень.");
+  });
 
-    if (rows.length === 0) {
-      return ctx.reply("Немає активних замовлень.");
-    }
+  bot.command("new", async (ctx) => {
+    const result = await db.execute({
+      sql: "SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20",
+      args: ["new"],
+    });
+    await sendOrderList(ctx, result.rows, "Немає нових замовлень.");
+  });
 
-    for (const order of rows) {
-      await ctx.reply(buildOrderMessage(order), statusKeyboard(order.id));
-    }
+  bot.command("inprogress", async (ctx) => {
+    const result = await db.execute({
+      sql: "SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20",
+      args: ["in_progress"],
+    });
+    await sendOrderList(ctx, result.rows, "Немає замовлень в роботі.");
+  });
+
+  bot.command("ready", async (ctx) => {
+    const result = await db.execute({
+      sql: "SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20",
+      args: ["ready"],
+    });
+    await sendOrderList(ctx, result.rows, "Немає готових замовлень.");
+  });
+
+  bot.command("delivered", async (ctx) => {
+    const result = await db.execute({
+      sql: "SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20",
+      args: ["delivered"],
+    });
+    await sendOrderList(ctx, result.rows, "Ще немає доставлених замовлень.");
+  });
+
+  bot.command("all", async (ctx) => {
+    const result = await db.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 30");
+    await sendOrderList(ctx, result.rows, "Замовлень ще немає.");
   });
 
   bot.on("callback_query", async (ctx) => {
@@ -134,7 +206,10 @@ if (bot) {
     }
 
     try {
-      await ctx.editMessageText(buildOrderMessage(order), statusKeyboard(order.id));
+      await ctx.editMessageText(buildOrderMessage(order), {
+        parse_mode: "HTML",
+        ...statusKeyboard(order.id),
+      });
     } catch (err) {
       // повідомлення могло бути вже змінене конкурентно — ігноруємо
     }
@@ -144,6 +219,16 @@ if (bot) {
 
 export function launchBot() {
   if (!bot) return;
+  bot.telegram.setMyCommands([
+    { command: "orders", description: "Активні замовлення (нові + в роботі + готові)" },
+    { command: "new", description: "Лише нові замовлення" },
+    { command: "inprogress", description: "Замовлення в роботі" },
+    { command: "ready", description: "Готові, очікують доставки" },
+    { command: "delivered", description: "Доставлені замовлення" },
+    { command: "all", description: "Усі замовлення (останні 30)" },
+    { command: "help", description: "Список команд" },
+  ]).catch((err) => console.error("Не вдалося зареєструвати команди бота:", err.message));
+
   bot.launch();
   console.log("🤖 Telegram-бот запущено");
   process.once("SIGINT", () => bot.stop("SIGINT"));
