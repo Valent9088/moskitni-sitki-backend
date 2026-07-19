@@ -73,9 +73,10 @@ export async function notifyNewOrder(order) {
   for (const chatId of ALLOWED_IDS) {
     try {
       const msg = await bot.telegram.sendMessage(chatId, buildOrderMessage(order), statusKeyboard(order.id));
-      db.prepare(
-        "UPDATE orders SET telegram_message_id = ?, telegram_chat_id = ? WHERE id = ?"
-      ).run(msg.message_id, chatId, order.id);
+      await db.execute({
+        sql: "UPDATE orders SET telegram_message_id = ?, telegram_chat_id = ? WHERE id = ?",
+        args: [msg.message_id, chatId, order.id],
+      });
     } catch (err) {
       console.error(`Не вдалося надіслати повідомлення в чат ${chatId}:`, err.message);
     }
@@ -94,18 +95,19 @@ if (bot) {
 
   bot.start((ctx) => ctx.reply("👋 Вітаю! Це CRM-бот moskitni_sitki. Команда /orders — список поточних замовлень."));
 
-  bot.command("orders", (ctx) => {
-    const rows = db
-      .prepare("SELECT * FROM orders WHERE status != 'delivered' ORDER BY created_at DESC LIMIT 20")
-      .all();
+  bot.command("orders", async (ctx) => {
+    const result = await db.execute(
+      "SELECT * FROM orders WHERE status != 'delivered' ORDER BY created_at DESC LIMIT 20"
+    );
+    const rows = result.rows;
 
     if (rows.length === 0) {
       return ctx.reply("Немає активних замовлень.");
     }
 
-    rows.forEach((order) => {
-      ctx.reply(buildOrderMessage(order), statusKeyboard(order.id));
-    });
+    for (const order of rows) {
+      await ctx.reply(buildOrderMessage(order), statusKeyboard(order.id));
+    }
   });
 
   bot.on("callback_query", async (ctx) => {
@@ -117,8 +119,19 @@ if (bot) {
       return ctx.answerCbQuery("Невідомий статус");
     }
 
-    db.prepare("UPDATE orders SET status = ? WHERE id = ?").run(newStatus, orderId);
-    const order = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
+    await db.execute({
+      sql: "UPDATE orders SET status = ? WHERE id = ?",
+      args: [newStatus, orderId],
+    });
+    const result = await db.execute({
+      sql: "SELECT * FROM orders WHERE id = ?",
+      args: [orderId],
+    });
+    const order = result.rows[0];
+
+    if (!order) {
+      return ctx.answerCbQuery("Замовлення не знайдено");
+    }
 
     try {
       await ctx.editMessageText(buildOrderMessage(order), statusKeyboard(order.id));
