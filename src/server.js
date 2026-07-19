@@ -2,10 +2,17 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import ordersRouter from "./routes/orders.js";
-import { launchBot } from "./bot.js";
+import { bot, launchBot } from "./bot.js";
 import { initDb } from "./db.js";
 
 const app = express();
+
+// Маршрут для Telegram webhook має бути ПЕРЕД express.json(),
+// оскільки Telegraf сам парсить тіло запиту.
+const WEBHOOK_PATH = "/telegram-webhook";
+if (bot) {
+  app.use(bot.webhookCallback(WEBHOOK_PATH));
+}
 
 app.use(
   cors({
@@ -22,9 +29,9 @@ const PORT = process.env.PORT || 4000;
 
 async function start() {
   await initDb(); // створює таблиці в Turso, якщо їх ще немає
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`✅ Бекенд запущено на порту ${PORT}`);
-    launchBot();
+    await launchBot(WEBHOOK_PATH);
   });
 }
 

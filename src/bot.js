@@ -217,20 +217,36 @@ if (bot) {
   });
 }
 
-export function launchBot() {
+export async function launchBot(webhookPath) {
   if (!bot) return;
-  bot.telegram.setMyCommands([
-    { command: "orders", description: "Активні замовлення (нові + в роботі + готові)" },
-    { command: "new", description: "Лише нові замовлення" },
-    { command: "inprogress", description: "Замовлення в роботі" },
-    { command: "ready", description: "Готові, очікують доставки" },
-    { command: "delivered", description: "Доставлені замовлення" },
-    { command: "all", description: "Усі замовлення (останні 30)" },
-    { command: "help", description: "Список команд" },
-  ]).catch((err) => console.error("Не вдалося зареєструвати команди бота:", err.message));
 
-  bot.launch();
-  console.log("🤖 Telegram-бот запущено");
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  await bot.telegram
+    .setMyCommands([
+      { command: "orders", description: "Активні замовлення (нові + в роботі + готові)" },
+      { command: "new", description: "Лише нові замовлення" },
+      { command: "inprogress", description: "Замовлення в роботі" },
+      { command: "ready", description: "Готові, очікують доставки" },
+      { command: "delivered", description: "Доставлені замовлення" },
+      { command: "all", description: "Усі замовлення (останні 30)" },
+      { command: "help", description: "Список команд" },
+    ])
+    .catch((err) => console.error("Не вдалося зареєструвати команди бота:", err.message));
+
+  // На Render (і будь-якому продакшн-хостингу) використовуємо webhook —
+  // це усуває конфлікт "409: terminated by other getUpdates request",
+  // який виникає з long polling під час перезапуску/деплою.
+  const publicUrl = process.env.PUBLIC_BACKEND_URL || process.env.RENDER_EXTERNAL_URL;
+
+  if (publicUrl && webhookPath) {
+    const webhookUrl = `${publicUrl.replace(/\/$/, "")}${webhookPath}`;
+    await bot.telegram.setWebhook(webhookUrl);
+    console.log(`🤖 Telegram-бот запущено у режимі webhook: ${webhookUrl}`);
+  } else {
+    // Локальна розробка без публічної адреси — звичайний long polling
+    await bot.telegram.deleteWebhook().catch(() => {});
+    bot.launch();
+    console.log("🤖 Telegram-бот запущено у режимі polling (локальна розробка)");
+    process.once("SIGINT", () => bot.stop("SIGINT"));
+    process.once("SIGTERM", () => bot.stop("SIGTERM"));
+  }
 }
